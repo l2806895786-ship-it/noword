@@ -1,20 +1,43 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, CheckCircle2, Home, RotateCcw, Star, Volume2 } from 'lucide-react';
+import {
+  AlertCircle,
+  BookOpen,
+  CheckCircle2,
+  FileSpreadsheet,
+  Home,
+  Loader2,
+  RotateCcw,
+  Star,
+  Volume2,
+} from 'lucide-react';
 import { AnsweredRecord } from './GameScreen';
 import { VocabItem } from '../data/vocabBank';
 import { playCompleteSound, speakEnglishWord } from '../utils/audio';
+import { SheetSyncStatus } from '../utils/sheetLogger';
 
 interface ResultScreenProps {
+  studentName: string;
+  playCount: number;
   score: number;
   records: AnsweredRecord[];
+  sheetSyncStatus: SheetSyncStatus;
+  sheetErrorMessage?: string | null;
+  onRetrySheetSync: () => void;
+  onOpenSheetSetup: () => void;
   onStartWrongReview: () => void;
   onPlayAgain: () => void;
   onGoHome: () => void;
 }
 
 export const ResultScreen: React.FC<ResultScreenProps> = ({
+  studentName,
+  playCount,
   score,
   records,
+  sheetSyncStatus,
+  sheetErrorMessage,
+  onRetrySheetSync,
+  onOpenSheetSetup,
   onStartWrongReview,
   onPlayAgain,
   onGoHome,
@@ -23,6 +46,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
 
   const totalCount = records.length;
   const correctCount = records.filter((r) => r.isCorrect).length;
+  const wrongCount = totalCount - correctCount;
   const wrongWords: VocabItem[] = records
     .filter((r) => !r.isCorrect)
     .map((r) => r.question.target);
@@ -57,12 +81,16 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
       <header className="w-full border-b border-slate-200 bg-white/90 backdrop-blur-md">
         <div className="max-w-5xl mx-auto px-5 h-14 flex items-center justify-between">
           <span className="text-lg font-extrabold tracking-tight text-slate-900">No word</span>
-          <span className="text-xs font-semibold text-slate-500">학습 결과</span>
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+            <span>{studentName}</span>
+            <span aria-hidden="true">·</span>
+            <span className="tabular-nums">{playCount}회차 학습 결과</span>
+          </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-5 py-6 sm:py-10 grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-10 items-start">
-        {/* Left / Top Summary Card: 별점(1~3개), 총점(화면 중앙), 맞힌 문제 수(8/10), Action Buttons */}
+        {/* Left / Top Summary Card */}
         <section className="lg:col-span-5 rounded-3xl bg-white border border-slate-200 shadow-sm p-6 sm:p-8 flex flex-col items-center text-center">
           {/* Star Rating (1~3개) */}
           <div className="flex items-center gap-2" aria-label={`별점 3개 중 ${starCount}개`}>
@@ -86,18 +114,75 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
             {score}점
           </h1>
 
-          <div className="mt-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
-            <span className="tabular-nums">
-              맞힌 문제 {correctCount}/{totalCount}
-            </span>
+          <div className="mt-3 flex items-center gap-2 text-sm font-semibold text-slate-700 flex-wrap justify-center">
+            <span className="tabular-nums">정답 {correctCount}개</span>
             <span aria-hidden="true">·</span>
-            <span className="tabular-nums text-blue-700">정답률 {accuracy}%</span>
+            <span className="tabular-nums">오답 {wrongCount}개</span>
+            <span aria-hidden="true">·</span>
+            <span className="tabular-nums text-blue-700">플레이 {playCount}회</span>
           </div>
 
           <p className="mt-3 text-sm text-slate-600 leading-relaxed">{feedbackMessage}</p>
 
-          {/* Action Buttons: [오답 다시 학습], [다시 하기], [처음으로] */}
-          <div className="w-full mt-7 flex flex-col gap-3">
+          {/* Google Sheet Sync Status Box */}
+          <div className="w-full mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-left flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0 text-xs">
+              {sheetSyncStatus === 'sending' && (
+                <>
+                  <Loader2 className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
+                  <span className="font-medium text-slate-700 truncate">
+                    구글 시트에 기록 저장 중...
+                  </span>
+                </>
+              )}
+              {sheetSyncStatus === 'success' && (
+                <>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span className="font-semibold text-emerald-800 truncate">
+                    구글 시트에 저장 완료
+                  </span>
+                </>
+              )}
+              {sheetSyncStatus === 'unconfigured' && (
+                <>
+                  <FileSpreadsheet className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span className="font-medium text-slate-700 truncate">
+                    시트 웹 앱 URL 미설정
+                  </span>
+                </>
+              )}
+              {sheetSyncStatus === 'error' && (
+                <>
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  <span className="font-medium text-red-700 leading-snug">
+                    시트 저장 실패{sheetErrorMessage ? `: ${sheetErrorMessage}` : ''}
+                  </span>
+                </>
+              )}
+            </div>
+
+            {sheetSyncStatus === 'unconfigured' && (
+              <button
+                type="button"
+                onClick={onOpenSheetSetup}
+                className="text-xs font-bold text-blue-700 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                연동 설정
+              </button>
+            )}
+            {sheetSyncStatus === 'error' && (
+              <button
+                type="button"
+                onClick={onRetrySheetSync}
+                className="text-xs font-bold text-blue-700 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                다시 전송
+              </button>
+            )}
+          </div>
+
+          {/* Action Buttons */}
+          <div className="w-full mt-6 flex flex-col gap-3">
             <button
               type="button"
               onClick={onStartWrongReview}
@@ -132,7 +217,7 @@ export const ResultScreen: React.FC<ResultScreenProps> = ({
           </div>
         </section>
 
-        {/* Right / Bottom Wrong Words List (틀린 단어 목록 + 발음 듣기) */}
+        {/* Right / Bottom Wrong Words List */}
         <section className="lg:col-span-7 rounded-3xl bg-white border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-5 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between">
             <div>

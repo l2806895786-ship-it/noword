@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { GameScreen, AnsweredRecord } from './components/GameScreen';
 import { ResultScreen } from './components/ResultScreen';
 import { ReviewScreen } from './components/ReviewScreen';
+import { SheetSetupModal } from './components/SheetSetupModal';
 import { StartScreen } from './components/StartScreen';
 import {
   CefrLevel,
@@ -10,6 +11,17 @@ import {
   VocabItem,
   generateQuizRound,
 } from './data/vocabBank';
+import {
+  SheetLogPayload,
+  SheetSyncStatus,
+  formatKoreaTimestamp,
+  getAppsScriptUrl,
+  getStudentPlayCount,
+  incrementStudentPlayCount,
+  loadStudentName,
+  logGameResultToSheet,
+  saveStudentName,
+} from './utils/sheetLogger';
 
 type AppScreen = 'START' | 'GAME' | 'RESULT' | 'REVIEW';
 
@@ -40,6 +52,7 @@ function loadBestScore(): number | null {
 
 export default function App() {
   const [screen, setScreen] = useState<AppScreen>('START');
+  const [studentName, setStudentName] = useState<string>(() => loadStudentName());
   const [levelFilter, setLevelFilter] = useState<'ALL' | CefrLevel>('ALL');
 
   const [questions, setQuestions] = useState<QuizQuestion[]>([]);
@@ -48,6 +61,14 @@ export default function App() {
 
   const [lastScore, setLastScore] = useState(0);
   const [lastRecords, setLastRecords] = useState<AnsweredRecord[]>([]);
+  const [lastPlayCount, setLastPlayCount] = useState(0);
+  const [lastLogPayload, setLastLogPayload] = useState<SheetLogPayload | null>(null);
+
+  const [sheetSyncStatus, setSheetSyncStatus] = useState<SheetSyncStatus>('idle');
+  const [sheetErrorMsg, setSheetErrorMsg] = useState<string | null>(null);
+  const [hasSheetConfigured, setHasSheetConfigured] = useState<boolean>(() => Boolean(getAppsScriptUrl()));
+  const [isSheetModalOpen, setIsSheetModalOpen] = useState(false);
+
   const [reviewWords, setReviewWords] = useState<VocabItem[]>([]);
   const [cameFromResult, setCameFromResult] = useState(false);
 
@@ -63,13 +84,32 @@ export default function App() {
     }
   }, [savedWrongWords]);
 
+  const handleStudentNameChange = useCallback((nextName: string) => {
+    setStudentName(nextName);
+    saveStudentName(nextName);
+  }, []);
+
+  const syncPayloadToSheet = useCallback(async (payload: SheetLogPayload) => {
+    setSheetSyncStatus('sending');
+    setSheetErrorMsg(null);
+    const result = await logGameResultToSheet(payload);
+    setSheetSyncStatus(result.status);
+    if (!result.ok && result.message) {
+      setSheetErrorMsg(result.message);
+    }
+  }, []);
+
   const startFreshGame = useCallback(() => {
+    const cleanName = studentName.trim();
+    if (cleanName) {
+      saveStudentName(cleanName);
+    }
     const round = generateQuizRound(levelFilter, 10);
     setQuestions(round);
     setIsRetryMode(false);
     setSessionId((prev) => prev + 1);
     setScreen('GAME');
-  }, [levelFilter]);
+  }, [levelFilter, studentName]);
 
   const startRetryQuiz = useCallback(
     (words: VocabItem[]) => {
@@ -117,9 +157,26 @@ export default function App() {
         return Array.from(nextMap.values());
       });
 
+      const cleanName = studentName.trim() || '익명';
+      const nextPlayCount = incrementStudentPlayCount(cleanName);
+      const correctCount = records.filter((r) => r.isCorrect).length;
+      const wrongCount = records.length - correctCount;
+
+      setLastPlayCount(nextPlayCount);
+      const payload: SheetLogPayload = {
+        timestamp: formatKoreaTimestamp(),
+        name: cleanName,
+        play_count: nextPlayCount,
+        correct_count: correctCount,
+        wrong_count: wrongCount,
+      };
+      setLastLogPayload(payload);
       setScreen('RESULT');
+
+      // Log asynchronously to Google Sheet via Apps Script Web App
+      void syncPayloadToSheet(payload);
     },
-    [isRetryMode]
+    [isRetryMode, studentName, syncPayloadToSheet]
   );
 
   const handleOpenResultReview = useCallback(() => {
@@ -143,50 +200,77 @@ export default function App() {
     setScreen('REVIEW');
   }, [savedWrongWords]);
 
-  if (screen === 'GAME') {
-    return (
-      <GameScreen
-        key={sessionId}
-        questions={questions}
-        isRetryMode={isRetryMode}
-        onFinish={handleGameFinish}
-        onExit={() => setScreen('START')}
-      />
-    );
-  }
-
-  if (screen === 'RESULT') {
-    return (
-      <ResultScreen
-        score={lastScore}
-        records={lastRecords}
-        onStartWrongReview={handleOpenResultReview}
-        onPlayAgain={startFreshGame}
-        onGoHome={() => setScreen('START')}
-      />
-    );
-  }
-
-  if (screen === 'REVIEW') {
-    return (
-      <ReviewScreen
-        words={reviewWords}
-        title={cameFromResult && lastRecords.every((r) => r.isCorrect) ? '오늘의 단어 복습' : '오답 다시 학습'}
-        onRetryQuizWithWords={startRetryQuiz}
-        onBackToResult={cameFromResult ? () => setScreen('RESULT') : undefined}
-        onGoHome={() => setScreen('START')}
-      />
-    );
-  }
+  const currentPlayCount = getStudentPlayCount(studentName);
 
   return (
-    <StartScreen
-      levelFilter={levelFilter}
-      onLevelChange={setLevelFilter}
-      onStartGame={startFreshGame}
-      savedWrongCount={savedWrongWords.length}
-      onReviewSavedWrong={handleOpenSavedReview}
-      bestScore={bestScore}
-    />
+    <>
+      {screen === 'GAME' && (
+        <GameScreen
+          key={sessionId}
+          questions={questions}
+          isRetryMode={isRetryMode}
+          onFinish={handleGameFinish}
+          onExit={() => setScreen('START')}
+        />
+      )}
+
+      {screen === 'RESULT' && (
+        <ResultScreen
+          studentName={studentName.trim() || '익명'}
+          playCount={lastPlayCount}
+          score={lastScore}
+          records={lastRecords}
+          sheetSyncStatus={sheetSyncStatus}
+          sheetErrorMessage={sheetErrorMsg}
+          onRetrySheetSync={() => {
+            if (lastLogPayload) {
+              void syncPayloadToSheet(lastLogPayload);
+            }
+          }}
+          onOpenSheetSetup={() => setIsSheetModalOpen(true)}
+          onStartWrongReview={handleOpenResultReview}
+          onPlayAgain={startFreshGame}
+          onGoHome={() => setScreen('START')}
+        />
+      )}
+
+      {screen === 'REVIEW' && (
+        <ReviewScreen
+          words={reviewWords}
+          title={cameFromResult && lastRecords.every((r) => r.isCorrect) ? '오늘의 단어 복습' : '오답 다시 학습'}
+          onRetryQuizWithWords={startRetryQuiz}
+          onBackToResult={cameFromResult ? () => setScreen('RESULT') : undefined}
+          onGoHome={() => setScreen('START')}
+        />
+      )}
+
+      {screen === 'START' && (
+        <StartScreen
+          studentName={studentName}
+          onStudentNameChange={handleStudentNameChange}
+          playCountForStudent={currentPlayCount}
+          levelFilter={levelFilter}
+          onLevelChange={setLevelFilter}
+          onStartGame={startFreshGame}
+          savedWrongCount={savedWrongWords.length}
+          onReviewSavedWrong={handleOpenSavedReview}
+          bestScore={bestScore}
+          hasSheetConfigured={hasSheetConfigured}
+          onOpenSheetSetup={() => setIsSheetModalOpen(true)}
+        />
+      )}
+
+      <SheetSetupModal
+        isOpen={isSheetModalOpen}
+        onClose={() => setIsSheetModalOpen(false)}
+        onUrlUpdated={(newUrl) => {
+          const configured = Boolean(newUrl.trim() || getAppsScriptUrl());
+          setHasSheetConfigured(configured);
+          if (configured && screen === 'RESULT' && lastLogPayload && sheetSyncStatus === 'unconfigured') {
+            void syncPayloadToSheet(lastLogPayload);
+          }
+        }}
+      />
+    </>
   );
 }
